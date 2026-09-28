@@ -52,7 +52,7 @@ More terms, for the same reader. The fenced gherkin blocks are these same cases 
 
 Preconditions: an unregistered, valid e-mail address.
 
-How to test: Manual - needs a solved security check, a new account and a mailbox. R1 and R6 have not been run while writing the document, because both need a person to solve the security check, and R1 also needs a mailbox; nor has L1 on an account whose e-mail address is confirmed, because the account used so far is not confirmed. The three readings R1 names, the confirmation page, the subject line of the message and the wording of the dialog, are what its first run confirms.
+How to test: Manual - needs a solved security check, a new account and a mailbox. R1 has been run once, with a person solving the security check by hand, and all three readings it names, the confirmation page, the subject line of the message and the wording of the dialog, were taken on that run and are recorded below. R6 has also been run once, the same way.
 
 | Step | Action |
 |---|---|
@@ -61,13 +61,13 @@ How to test: Manual - needs a solved security check, a new account and a mailbox
 | 3 | Select a date of birth at least 18 years in the past, tick the terms checkbox, and solve the security check. |
 | 4 | Press **BEGIN ADVENTURE**. |
 
-Expected result of steps 1 to 4: the confirmation page opens, and it says the confirmation e-mail has been sent and offers to send it again.
+Expected result of steps 1 to 4: the confirmation page opens at `/en/registration/confirmation`, headed `Confirm your e-mail address`, and says `The confirmation e-mail has been sent to your e-mail address! - Click on the link in this e-mail to confirm your e-mail address.` next to a `RESEND E-MAIL` control, as read on the live run.
 
 | Step | Action |
 |---|---|
-| 5 | Open the mailbox, open the message whose subject is `GameTwist - Confirm email address - <nickname>` (the wording to be confirmed on the first run), and follow the link in it. |
+| 5 | Open the mailbox, open the message whose subject is `GameTwist - Confirm email address - <nickname>`, which is the subject the service sent on the live run with the nickname in place of the placeholder, and follow the link in it. |
 
-Expected result of step 5: a dialog appears confirming the address, with the wording `Your e-mail address has been confirmed. You can log in now.` to be read from the first run, and no unconfirmed-address notice is shown.
+Expected result of step 5: a dialog headed `E-mail confirmation` appears, with the wording `Your e-mail address has been confirmed. You can log in now.`, as read on the live run, and no unconfirmed-address notice is shown afterwards.
 
 ```gherkin
 @R1 @happy-path @manual
@@ -373,7 +373,7 @@ How to test: Manual - the refusal comes from the service, so the submit has to b
 | 3 | Tick the terms checkbox and solve the security check. |
 | 4 | Press **BEGIN ADVENTURE**. |
 
-Expected result: the registration is refused, the page says the address is already in use, the page stays on the registration page, and no confirmation page opens. The wording recorded here, `The e-mail address you entered is already in use.`, has not been seen on a live run, so this case records the exact text when it is first run. The browser refuses R2, R3 and R5 before a registration request leaves the browser, and R2's registered-nickname row sends no registration request either: its answer comes from the availability check while the nickname is typed. R4's silence is what its first run confirms. R1 and R6 are the two cases whose answer to the submit comes from the service, so a registration request is expected here as it is in R1.
+Expected result: the registration is refused, the page says the address is already in use, the page stays on the registration page, and no confirmation page opens. Measured on a live run: the message shown was `The e-mail address you entered is already in use.`, the page stayed on the registration page, and no confirmation page opened. The browser refuses R2, R3 and R5 before a registration request leaves the browser, and R2's registered-nickname row sends no registration request either: its answer comes from the availability check while the nickname is typed. R4's silence is what its first run confirms. R1 and R6 are the two cases whose answer to the submit comes from the service, so a registration request is expected here as it is in R1.
 
 The page does not answer this rule on its own: it flags a nickname that is taken while it is typed, which is the R2 case, and the answer about an address is expected only from the service, after the submit. That is why this case needs the submit to be completed and the security check solved, and why it cannot be automated here.
 
@@ -396,7 +396,7 @@ Scenario: An e-mail address that is already in use is refused
 
 Preconditions: the credentials of a test account whose e-mail address is confirmed.
 
-How to test: Automated - needs the test account, and the login form has no security check. The sign-in itself is measured, on an account whose address is not confirmed, so the confirmed-account path and the absence of the notice at the end of the expected result are what a first run on such an account confirms.
+How to test: Automated - needs the test account, and the login form has no security check. The sign-in is measured twice, on an account whose address is not confirmed and on one whose address is confirmed: in the first the notice is shown, and in the second the header carries the nickname and no notice appears, which is the expected result below.
 
 | Step | Action |
 |---|---|
@@ -515,7 +515,7 @@ Section 3 marks eight cases automated and two manual. This section gives the rea
 
 **Approach for R1.**
 
-- Run once per release candidate, and again when the form, the terms text, the security check or the confirmation e-mail changes.
+- Run once per release candidate, and again when the form, the terms text, the security check or the confirmation e-mail changes. The confirmation e-mail itself states that a player may hold only one GameTwist account, so this case creates one account per candidate at most and the account is kept rather than discarded.
 - Data: a fresh address from a domain the team controls, and a human for the security check.
 - Record: build, date, the address used, whether the message arrived and how long it took, the dialog wording if it differs, and any deviation.
 - End state: signed out, so the login cases start from a signed-out browser.
@@ -538,7 +538,7 @@ Section 3 marks eight cases automated and two manual. This section gives the rea
 | Browser | Chromium, desktop viewport |
 | Accounts | One confirmed test account for L1 and L3, one unconfirmed test account for L4, and one account whose nickname is already registered for the registered-nickname row of R2; all are set up before a run |
 | Credentials | Supplied by the environment, and never written into this document |
-| Address for R1 | A fresh address from a domain the team controls, one per run |
+| Address for R1 | A fresh address from a domain the team controls, one per run. A plus alias is refused by the service with `It's not allowed to use an email alias.`, which the browser-side validation accepts and the service then rejects, so the address must be a plain one |
 | Address for R6 | The e-mail address of the account named in the R6 precondition |
 | Shared case data | A valid e-mail address is any address that is not registered; a valid nickname is any nickname that is not taken; a valid password is at least 10 characters with a number or a special character, and the cases use Abcdefgh12!; a valid date of birth is 18 years or more in the past, and each case that needs one selects it at run time |
 | Cookie dialog | OneTrust; the six registration cases name rejecting it in their step 1, and the login cases inherit that from the preamble to section 4 |

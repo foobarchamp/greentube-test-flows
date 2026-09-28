@@ -157,7 +157,8 @@ Before(function () {
 /**
  * Draws an id that answers 404, so the record the scenario creates is its own. The probe and the write
  * are two requests, so another client can take the id in between; letting the sandbox assign it is
- * worse, because an id-less POST stores the record under 9223372036854775807.
+ * worse, because its documented behaviour is to store an id-less POST under 9223372036854775807, which
+ * no run here probes: writing that id would overwrite a record other clients of the sandbox hold.
  */
 async function freeId(): Promise<number> {
   const occupied: string[] = [];
