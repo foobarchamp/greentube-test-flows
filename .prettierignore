@@ -1,0 +1,10 @@
+# Generated, not authored: npm rewrites it and the diff would be noise.
+package-lock.json
+
+# Installed and generated output.
+node_modules/
+reports/
+
+# The two documents are hand-formatted markdown: Prettier reflows their tables and list indentation,
+# which would rewrite the document that was written and reviewed. The format gate leaves markdown out.
+*.md

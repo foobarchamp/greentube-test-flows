@@ -1,0 +1,68 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Publishing the JUnit file as a check on the commit needs `checks: write`, and this repository's
+# default is read. Without this the publish step degrades to a warning and the results never appear,
+# which is the kind of silence a green run should not be able to hide behind.
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  api:
+    name: api (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      # One failing version must not hide the result for the others.
+      fail-fast: false
+      matrix:
+        # The lines package.json declares support for: 22.18 at the declared floor, and the current
+        # release of the 24 and 26 lines, because setup-node resolves a bare major that way.
+        node-version: ['22.18', '24', '26']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - name: The formatting, lint, type-check and suite gate
+        run: npm run check
+      - name: The JUnit report must exist and must record a run
+        # A feature file that has gone missing, or a tag expression that matches nothing, exits 0 and
+        # writes a JUnit file reading tests="0". From the exit code alone a green run and a run that
+        # executed nothing look the same, so this step rejects both. Each check exits by itself rather
+        # than relying on the shell's error flags, so the step behaves the same in every POSIX shell
+        # mode it was run in, with and without errexit. It is POSIX shell script, not PowerShell, and
+        # the job runs on Linux.
+        run: |
+          if [ ! -f reports/petstore-report.xml ]; then
+            echo 'the run wrote no JUnit report, so this job proves nothing'
+            exit 1
+          fi
+          if grep -q 'tests="0"' reports/petstore-report.xml; then
+            echo 'the report records no scenario, so this run proves nothing'
+            exit 1
+          fi
+      - name: Keep the run report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: petstore-report-node-${{ matrix.node-version }}
+          path: reports/
+          if-no-files-found: warn
+      # The job is red because `npm run check` failed, not because of this file. A failure raised by the
+      # run-level hook is not a scenario failure, so it is not in the JUnit file this step publishes. It is
+      # in the console output and in the HTML report the step above uploads, and the README says so. This
+      # step can therefore publish a file that reads failures="0" for a run that failed.
+      - name: Publish the test results
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: reports/petstore-report.xml
+          fail_on_failure: false

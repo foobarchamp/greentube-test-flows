@@ -1,0 +1,10 @@
+# Keep every text file LF in the repository and on checkout, on every platform.
+#
+# Without this, a Windows checkout with core.autocrlf=true materialises CRLF, and Prettier, which expects
+# LF by default, then reports those files as badly formatted on the Windows machine while the same files
+# pass on a Linux checkout. The workflow itself has not run for this commit, so what is verified is a local
+# run on the three Node lines it declares. This governs a fresh checkout: a clone made before this file existed keeps its CRLF working
+# tree, because git add --renormalize . repairs the index and not the files on disk, so clone again to
+# pick the setting up.
+
+* text=auto eol=lf

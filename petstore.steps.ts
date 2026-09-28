@@ -1,34 +1,34 @@
 /**
- * Step definitions for petstore.feature.
+ * Step definitions and the request helper for petstore.feature. Run it with `npm test`; the base URL
+ * comes from PETSTORE_BASE_URL and defaults to the public sandbox.
  *
- * The whole suite is this file plus the feature. One helper performs every request and records which
- * method was sent, one object holds the scenario's payload and responses, and the hooks delete every
- * id the scenario creates and prove each deletion with a read-back 404.
- *
- * Run with: cucumber-js, pointed at petstore.feature for its paths and at this file for its import.
- * This folder ships the suite only, so it carries no package manifest and no cucumber configuration.
- * Base URL: PETSTORE_BASE_URL, defaulting to the public sandbox.
+ * The hooks delete the ids a scenario creates and prove each deletion they can with a read-back 404;
+ * the run-level hook sweeps and reports the rest.
  */
 import assert from 'node:assert/strict';
 import { randomInt } from 'node:crypto';
-import { After, AfterAll, Given, Then, When, setDefaultTimeout } from '@cucumber/cucumber';
+import { After, AfterAll, Before, Given, Then, When, setDefaultTimeout } from '@cucumber/cucumber';
 
-// A shared public sandbox can answer slowly, and a step that waits longer than this is a problem to
-// report rather than a reason to sit forever: without this, cucumber's own 5 s default aborts a step
-// with a message that names no URL, and the cleanup runs late or not at all.
+// Cucumber's own 5 s default aborts a step with a message that names no URL, so the ceiling is raised
+// to 30 s and covers every step and every hook. A host that never answers is bounded inside call() by
+// the connect timeout at ten seconds and the abort at fifteen, both of which name the method and URL; a
+// step that makes several slow calls can still reach the ceiling and abort without one.
 setDefaultTimeout(30_000);
 
-// Draw the base URL without a trailing slash: one typed into a shell or a CI variable ends with one
-// often enough, and it produces //pet, which the sandbox answers 404.
+// Trim a trailing slash: one typed into a shell or a CI variable produces //pet, which answers 404.
 const BASE_URL = (process.env.PETSTORE_BASE_URL ?? 'https://petstore.swagger.io/v2').replace(/\/+$/, '');
 
-type Reply = { method: string; status: number; body: any; text: string };
+/** The parsed body of a reply, or null when it is not a JSON object: the 405 replies carry XML, and a
+ *  delete of an id the sandbox does not hold answers 404 with an empty body. */
+type JsonBody = Record<string, unknown>;
+type Reply = { method: string; status: number; body: JsonBody | null; text: string };
 type Pet = { id: number; name: string; photoUrls: string[]; status: string };
 
-/** Ids this scenario has sent or created. Cleared at the start of every scenario. */
+/** Ids this scenario has sent or created; anything still here when the next scenario starts is what the
+ *  Before guard fails on. */
 const created = new Set<number>();
 
-/** Ids whose deletion could not be proved. Never cleared by a scenario, so AfterAll still sees them. */
+/** Ids whose deletion could not be proved, kept for the run-level hook. */
 const leaked = new Set<number>();
 
 /** The scenario's state: the payload, the responses, and the id the create response echoed. */
@@ -41,47 +41,84 @@ const state = {
   getReply: undefined as Reply | undefined,
 };
 
-/** One helper for every call, so each request goes through one place. */
-async function call(method: string, path: string, body?: string): Promise<Reply> {
-  const reply = await fetch(`${BASE_URL}${path}`, {
-    method,
-    headers: body === undefined ? {} : { 'content-type': 'application/json' },
-    body,
-    // A request that never answers must not leave a record behind: abort, then let the hooks clean up.
-    signal: AbortSignal.timeout(15_000),
-  });
-  const text = await reply.text();
-  let parsed: any = null;
+/** Parses a reply body, or null when it is not a JSON object. */
+function parseBody(text: string): JsonBody | null {
+  if (text === '') return null;
   try {
-    parsed = text === '' ? null : JSON.parse(text);
+    const value: unknown = JSON.parse(text);
+    return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as JsonBody) : null;
   } catch {
-    parsed = null;
+    return null;
   }
-  return { method, status: reply.status, body: parsed, text };
 }
 
-/** Deletes an id and proves it is gone. A 404 on the delete is fine: the record is already absent. */
+/**
+ * One helper for every call, so the reply is read inside the same try that made the request: a body
+ * that never arrives is named the same way as a connection that never opens.
+ *
+ * A failed call is not retried, and its message carries the method and the URL. The only repeated
+ * requests are the hooks' deletes and the id draws, described where they live.
+ */
+async function call(method: string, path: string, body?: string): Promise<Reply> {
+  const url = `${BASE_URL}${path}`;
+  let response: Response;
+  let text: string;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: body === undefined ? {} : { 'content-type': 'application/json' },
+      body,
+      // A request that never answers must not leave a record behind: abort, then let the hooks clean up.
+      signal: AbortSignal.timeout(15_000),
+    });
+    text = await response.text();
+  } catch (cause) {
+    throw new Error(`${method} ${url} failed: ${(cause as Error).message}`, { cause });
+  }
+  return { method, status: response.status, body: parseBody(text), text };
+}
+
+/**
+ * Deletes an id and proves it is gone; a 404 on the delete is fine, the record is already absent.
+ *
+ * An id this cannot prove moves to `leaked` before the failure leaves here, so the run-level hook
+ * still sees it. `created` is emptied on every path, so a hook that did not finish shows up as an id
+ * the next scenario's guard can name.
+ */
 async function cleanup(id: number): Promise<void> {
-  const deleted = await call('DELETE', `/pet/${id}`);
-  if (deleted.status !== 200 && deleted.status !== 404) {
+  try {
+    const deleted = await call('DELETE', `/pet/${id}`);
+    if (deleted.status !== 200 && deleted.status !== 404) {
+      throw new Error(`cleanup: DELETE /pet/${id} answered ${deleted.status}`);
+    }
+    const readBack = await call('GET', `/pet/${id}`);
+    if (readBack.status !== 404) {
+      // Only a 404 proves the record is gone. A 200 proves it is still there; anything else proves
+      // neither, so the two are reported differently rather than calling every non-404 "still readable".
+      throw new Error(
+        readBack.status === 200
+          ? `cleanup: pet ${id} is still readable (200), so the delete is unproven`
+          : `cleanup: pet ${id} could not be proved gone: the read-back answered ${readBack.status}, and only a 404 proves the deletion`,
+      );
+    }
+    // Printed so the proof lives in the run's own output and not only in the assertion that made it.
+    console.log(
+      `cleanup: pet ${id} answered ${deleted.status} to DELETE, and reading it back answered ${readBack.status}`,
+    );
+    // Proved deleted, so it is nobody's problem any more.
+    leaked.delete(id);
+  } catch (error) {
     leaked.add(id);
-    throw new Error(`cleanup: DELETE /pet/${id} answered ${deleted.status}`);
+    throw error;
+  } finally {
+    created.delete(id);
   }
-  const readBack = await call('GET', `/pet/${id}`);
-  if (readBack.status !== 404) {
-    leaked.add(id);
-    throw new Error(`cleanup: pet ${id} is still readable (${readBack.status}), so the delete is unproven`);
-  }
-  // Only now is the id safe to forget. An id that could not be proved is moved to leaked instead, which
-  // the next scenario does not clear, so AfterAll gets a second attempt at it.
-  created.delete(id);
-  leaked.delete(id);
 }
 
-/** Attempts every id this run still holds, so one bad record cannot strand the rest. */
-async function cleanupAll(): Promise<void> {
+/** Attempts every id in the given set, so one bad record cannot stop the rest from being reported. */
+async function cleanupAll(ids: Iterable<number>): Promise<void> {
   const failures: string[] = [];
-  for (const id of [...new Set([...created, ...leaked])]) {
+  for (const id of [...ids]) {
     try {
       await cleanup(id);
     } catch (error) {
@@ -93,25 +130,50 @@ async function cleanupAll(): Promise<void> {
   }
 }
 
-/** Draws an id the sandbox does not hold, so no other client's record is overwritten or deleted. */
-async function freeId(): Promise<number> {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const candidate = randomInt(1, 1_000_000_000);
-    const probe = await call('GET', `/pet/${candidate}`);
-    if (probe.status === 404) return candidate;
+/**
+ * Starts a scenario from a clean slate, and refuses to start on top of an unexplained record.
+ *
+ * cleanup() empties `created` on every path, so an id still here means the previous scenario's After
+ * hook did not run or did not finish. The ids move to `leaked` and this scenario fails, naming them,
+ * so a missing hook is reported while the run is going rather than only counted at the end.
+ */
+Before(function () {
+  if (created.size > 0) {
+    const stranded = [...created];
+    for (const id of stranded) leaked.add(id);
+    created.clear();
+    throw new Error(
+      `the previous scenario's After hook did not run to completion, so the deletion of ${stranded.length} record(s) is unproved: ${stranded.join(', ')}`,
+    );
   }
-  throw new Error('no free pet id found in five draws');
-}
-
-Given('a pet payload with an id drawn at random for this scenario', async function () {
-  created.clear();
-  const id = await freeId();
-  state.pet = { id, name: `qa-pet-${id}`, photoUrls: ['https://example.com/pet.png'], status: 'available' };
+  state.pet = undefined;
   state.storedId = undefined;
   state.lastReply = undefined;
   state.postReply = undefined;
   state.putReply = undefined;
   state.getReply = undefined;
+});
+
+/**
+ * Draws an id that answers 404, so the record the scenario creates is its own. The probe and the write
+ * are two requests, so another client can take the id in between; letting the sandbox assign it is
+ * worse, because an id-less POST stores the record under 9223372036854775807.
+ */
+async function freeId(): Promise<number> {
+  const occupied: string[] = [];
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const candidate = randomInt(1, 1_000_000_000);
+    const probe = await call('GET', `/pet/${candidate}`);
+    if (probe.status === 404) return candidate;
+    // Each reply is reported with the status it answered: one number cannot describe five ids.
+    occupied.push(`${candidate} answered ${probe.status}`);
+  }
+  throw new Error(`no free pet id found in five draws, so this scenario cannot run: ${occupied.join(', ')}`);
+}
+
+Given('a pet payload with an id drawn at random for this scenario', async function () {
+  const id = await freeId();
+  state.pet = { id, name: `qa-pet-${id}`, photoUrls: ['https://example.com/pet.png'], status: 'available' };
 });
 
 Given('the pet has been created with POST', async function () {
@@ -121,14 +183,14 @@ Given('the pet has been created with POST', async function () {
 });
 
 /** Creates the pet. The payload id is remembered before the response is read, so a POST that fails
- *  after the record was written is still cleaned up; the id the response carries is remembered too,
- *  in case the service stored the record under its own id. */
+ *  after the record was written is still cleaned up; the echoed id is remembered too. */
 async function create(pet: Pet): Promise<Reply> {
   created.add(pet.id);
   const reply = await call('POST', '/pet', JSON.stringify(pet));
-  if (typeof reply.body?.id === 'number') {
-    state.storedId = reply.body.id;
-    created.add(reply.body.id);
+  const echoedId = reply.body?.['id'];
+  if (typeof echoedId === 'number') {
+    state.storedId = echoedId;
+    created.add(echoedId);
   }
   return reply;
 }
@@ -140,28 +202,36 @@ When('I create the pet with POST', async function () {
 });
 
 When('I read the pet back using the created id', async function () {
-  assert.ok(state.storedId, 'no id: the pet has not been created');
+  assert.ok(state.storedId, 'the stored id is missing, so this step cannot run');
   state.getReply = await call('GET', `/pet/${state.storedId}`);
   state.lastReply = state.getReply;
 });
 
 When('I ask for an id that this run has not created', async function () {
-  // The sandbox is shared and an id someone else owns answers 200. Draw until one answers 404, so a
-  // 200 in the scenario below can only mean the draw collided with a stranger's record.
-  let reply: Reply | undefined;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    reply = await call('GET', `/pet/${randomInt(900_000_000, 1_000_000_000)}`);
-    if (reply.status === 404) break;
+  // An id someone else owns answers 200, so draw until one answers 404; five collisions are not the
+  // service answering wrongly, and each reply is reported with the status it gave.
+  const inTheWay: string[] = [];
+  let unknown: Reply | undefined;
+  while (inTheWay.length < 5) {
+    const candidate = randomInt(900_000_000, 1_000_000_000);
+    const reply = await call('GET', `/pet/${candidate}`);
+    if (reply.status === 404) {
+      unknown = reply;
+      break;
+    }
+    inTheWay.push(`${candidate} answered ${reply.status}`);
   }
-  state.lastReply = reply;
+  if (unknown === undefined) {
+    throw new Error(`no unknown id found in five draws, so this scenario cannot run: ${inTheWay.join(', ')}`);
+  }
+  state.lastReply = unknown;
 });
 
 When(
   'I replace the pet with PUT using the name {string} and the status {string}',
   async function (name: string, status: string) {
-    assert.ok(state.pet && state.storedId, 'no pet: it has not been created');
-    // photoUrls is deliberately left out: PUT must replace the record, so the stored record may not
-    // keep the value the create sent. A merge implementation fails the assertion that follows.
+    assert.ok(state.pet && state.storedId, 'the payload or the stored id is missing, so this step cannot run');
+    // photoUrls is left out on purpose: PUT must replace, so a merge fails the assertion below.
     const replacement = { id: state.storedId, name, status };
     state.putReply = await call('PUT', '/pet', JSON.stringify(replacement));
     state.lastReply = state.putReply;
@@ -169,7 +239,7 @@ When(
 );
 
 When('I delete the pet using the created id', async function () {
-  assert.ok(state.storedId, 'no id: the pet has not been created');
+  assert.ok(state.storedId, 'the stored id is missing, so this step cannot run');
   state.lastReply = await call('DELETE', `/pet/${state.storedId}`);
 });
 
@@ -190,19 +260,41 @@ Then('the response status is {int}', function (expected: number) {
   );
 });
 
-/** The status alone would let a service that answered 400 for every request pass this scenario. */
+/** The status check alone would pass for a service that answered 400 to everything, so the scenario
+ *  checks the body as well. */
 Then('the error body reports the rejection', function () {
   assert.ok(state.lastReply, 'no response recorded in this scenario');
-  const body = state.lastReply.body ?? {};
-  assert.equal(body.code, state.lastReply.status, 'the error body reports a different code');
-  assert.ok(typeof body.message === 'string' && body.message.length > 0, 'the error body carries no message');
+  // A body that is empty, HTML or an array is not a JSON object, so the shape is named before the
+  // checks below, which speak about a code and a message the body carries.
+  const carried = state.lastReply.body;
+  assert.ok(
+    carried !== null,
+    `the error reply carried no JSON object, so this step cannot read a code from it: ${state.lastReply.text.slice(0, 120)}`,
+  );
+  assert.ok(
+    'code' in carried,
+    `the error body carries no code member, so there is nothing to compare with the status ${state.lastReply.status}: ${state.lastReply.text.slice(0, 120)}`,
+  );
+  assert.equal(
+    carried.code,
+    state.lastReply.status,
+    `the error body reports the code ${JSON.stringify(carried.code)}, not the status ${state.lastReply.status}`,
+  );
+  // A present but unreadable message is not a missing one, so the two are reported apart.
+  assert.ok('message' in carried, `the error body carries no message member: ${state.lastReply.text.slice(0, 120)}`);
+  assert.ok(
+    typeof carried.message === 'string' && carried.message.length > 0,
+    `the error body's message is not a non-empty string: ${JSON.stringify(carried.message)}`,
+  );
 });
 
-/** The status alone does not always identify the request: DELETE /pet answers 405 as well, so a
- *  scenario about an unsupported method has to say which method it actually sent. */
-Then('the request sent was a {string}', function (method: string) {
+/** The status alone does not always identify the request: the sandbox answers 405 to DELETE /pet and
+ *  to PATCH /pet with a byte-identical body and no Allow header. This compares the method the helper
+ *  recorded, so it catches a step that sends the wrong one and cannot see a substitution made inside
+ *  the helper. */
+Then('the helper was asked to send a {string}', function (method: string) {
   assert.ok(state.lastReply, 'no response recorded in this scenario');
-  assert.equal(state.lastReply.method, method, `the request sent was a ${state.lastReply.method}, not a ${method}`);
+  assert.equal(state.lastReply.method, method, `the helper was asked for a ${state.lastReply.method}, not a ${method}`);
 });
 
 Then('the create response carries what the payload sent', function () {
@@ -225,8 +317,8 @@ Then('the GET response matches the POST response', function () {
     state.postReply.body,
     `the record created by POST is not the record returned by GET\nPOST: ${JSON.stringify(state.postReply.body)}\nGET : ${JSON.stringify(state.getReply.body)}`,
   );
-  // The comparison above compares two responses. These assertions compare the read-back with what was
-  // sent, so a field the sandbox dropped or rewrote on the way in cannot pass unnoticed.
+  // The comparison above prints both bodies when they differ; these four compare the read-back with
+  // the payload field by field, and a green run passes them.
   const stored = state.getReply.body ?? {};
   assert.equal(stored.id, state.pet.id, 'the stored record lost the id that was sent');
   assert.equal(stored.name, state.pet.name, 'the stored record lost the name that was sent');
@@ -243,22 +335,28 @@ Then(
   'the stored pet carries the name {string}, the status {string} and no other photoUrls',
   function (name: string, status: string) {
     assert.ok(state.getReply, 'no GET response recorded');
-    const stored = state.getReply.body ?? {};
-    assert.equal(stored.name, name, 'GET still shows the old name');
-    assert.equal(stored.status, status, 'GET still shows the old status');
+    const stored: JsonBody = state.getReply.body ?? {};
+    // The guard tells two failures apart: a reply that carried nothing and a record that lost the
+    // field are not the same answer, and only it says which of the two the run saw.
     assert.ok(
-      !stored.photoUrls || stored.photoUrls.length === 0,
-      `the stored record still carries photoUrls (${JSON.stringify(stored.photoUrls)}), so PUT merged instead of replacing`,
+      state.getReply.body !== null,
+      `the read-back carried no JSON object, so it shows neither the new values nor the old ones: ${state.getReply.text.slice(0, 120)}`,
+    );
+    assert.equal(stored.name, name, 'the read-back does not carry the name that was sent');
+    assert.equal(stored.status, status, 'the read-back does not carry the status that was sent');
+    const photoUrls = stored.photoUrls;
+    assert.ok(
+      photoUrls === undefined || photoUrls === null || (Array.isArray(photoUrls) && photoUrls.length === 0),
+      `the stored record still carries photoUrls (${JSON.stringify(photoUrls)}), so PUT merged instead of replacing`,
     );
   },
 );
 
 Then('the pet cannot be read back any more', async function () {
-  assert.ok(state.storedId, 'no id: the pet has not been created');
+  assert.ok(state.storedId, 'the stored id is missing, so this step cannot run');
   const readBack = await call('GET', `/pet/${state.storedId}`);
   assert.equal(readBack.status, 404, `a deleted pet answered ${readBack.status}`);
-  // The record is gone, so stop asking the hooks to delete it.
-  created.delete(state.storedId);
+  // The id stays in the hook's set on purpose, so the After hook proves the deletion a second time.
 });
 
 Then('the error message says that the pet was not found', function () {
@@ -271,9 +369,22 @@ Then('the error message says that the pet was not found', function () {
 });
 
 After(async function () {
-  await cleanupAll();
+  // Only what this scenario created; ids that already failed to clean up are the run-level hook's.
+  await cleanupAll(created);
 });
 
 AfterAll(async function () {
-  await cleanupAll();
+  // A last scenario whose After hook never ran leaves its ids here, and this is the last place that
+  // can notice; an earlier scenario's leftovers were caught by the next scenario's Before guard. They
+  // are swept and the run is failed, because the alternative is a green suite that left records behind.
+  const stranded = [...created];
+  for (const id of stranded) leaked.add(id);
+  created.clear();
+  await cleanupAll(leaked);
+  if (stranded.length > 0) {
+    throw new Error(
+      `${stranded.length} record(s) reached the end of the run without their scenario's cleanup. The ` +
+        `run-level hook has now deleted and proved them gone: ${stranded.join(', ')}`,
+    );
+  }
 });

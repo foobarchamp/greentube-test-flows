@@ -1,0 +1,14 @@
+# dependencies
+node_modules/
+
+# generated test output
+reports/
+
+# local config
+.env
+.env.local
+
+# editor / OS
+.vscode/
+.idea/
+Thumbs.db
